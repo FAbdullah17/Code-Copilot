@@ -11,4 +11,6 @@ transformers
 torch
 evaluate
 scipy
+fastapi
+pydantic
 -e .
