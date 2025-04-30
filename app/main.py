@@ -1,55 +1,51 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import AutoTokenizer, AutoModelForCausalLM
 import torch
-import uvicorn
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from peft import PeftModel
 
-MODEL_DIR = "output/checkpoint-750"  
+MODEL_NAME = "deepseek-coder-1.3b-base"
+CHECKPOINT_PATH = "output/checkpoint-750"
 
-try:
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_DIR).to(DEVICE)
-    model.eval()
-except Exception as e:
-    raise RuntimeError(f"Error loading model from {MODEL_DIR}: {e}")
+bnb_config = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_use_double_quant=True,
+                                bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16)
 
-app = FastAPI(title="Code Copilot API", description="Generate code using your fine-tuned LLM", version="1.0")
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+base_model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, quantization_config=bnb_config, device_map="auto", trust_remote_code=True)
+model = PeftModel.from_pretrained(base_model, CHECKPOINT_PATH)
+model.eval()
 
-class CodeRequest(BaseModel):
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/", response_class=HTMLResponse)
+async def get_ui():
+    return FileResponse("static/index.html", "static/style.css")
+
+class PromptRequest(BaseModel):
     prompt: str
-    max_new_tokens: int = 256
-    temperature: float = 0.7
-    top_p: float = 0.9
 
-class CodeResponse(BaseModel):
-    generated_code: str
-
-def generate_code(prompt: str, max_new_tokens: int, temperature: float, top_p: float) -> str:
-    inputs = tokenizer(prompt, return_tensors="pt").to(DEVICE)
+@app.post("/generate")
+async def generate_code(request: PromptRequest):
+    input_prompt = request.prompt
+    inputs = tokenizer(input_prompt, return_tensors="pt").to(model.device)
+    
     with torch.no_grad():
-        outputs = model.generate(
-            input_ids=inputs["input_ids"],
-            attention_mask=inputs["attention_mask"],
-            max_new_tokens=max_new_tokens,
-            do_sample=True,
-            temperature=temperature,
-            top_p=top_p,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-    return tokenizer.decode(outputs[0], skip_special_tokens=True)
+        outputs = model.generate(**inputs, max_new_tokens=300, do_sample=True, top_k=50, top_p=0.95, temperature=0.8)
+    
+    generated_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    
+    generated_code = generated_text[len(input_prompt):].strip()
 
-@app.post("/generate", response_model=CodeResponse)
-def generate_code_endpoint(request: CodeRequest):
-    try:
-        result = generate_code(
-            prompt=request.prompt,
-            max_new_tokens=request.max_new_tokens,
-            temperature=request.temperature,
-            top_p=request.top_p,
-        )
-        return CodeResponse(generated_code=result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+    return JSONResponse(content={"generated_code": generated_code})
