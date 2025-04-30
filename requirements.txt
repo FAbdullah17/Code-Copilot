@@ -13,4 +13,3 @@ evaluate
 scipy
 fastapi
 pydantic
--e .
