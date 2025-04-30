@@ -9,3 +9,6 @@ random
 json
 transformers
 torch
+evaluate
+scipy
+-e .

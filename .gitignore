@@ -176,3 +176,5 @@ cython_debug/
 /data/raw/
 /data/processed/
 /data/tokenized/
+/weights/
+/output/
